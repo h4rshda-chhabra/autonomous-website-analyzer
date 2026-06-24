@@ -23,7 +23,7 @@ The platform:
 - Identifies cross-domain issues invisible to isolated tools
 - Produces a prioritized roadmap based on business impact and implementation effort
 
-The result is not another checklist of problems — it is a decision-making system for website optimization.
+The result is not another checklist of problems, it is a decision-making system for website optimization.
 
 ---
 
