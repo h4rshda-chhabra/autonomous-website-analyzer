@@ -1,0 +1,91 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+site/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# ─── Audit Output Files ───────────────────────────────────────────────────────
+# Audit result JSON dumps (e.g. audit_vatsintech_com_fad7c57a.json)
+audit_*.json
+audit_results/
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# ─── Testing ──────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.coveragerc
+.tox/
+
+# ─── Type Checking ────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+
+# ─── Linting ──────────────────────────────────────────────────────────────────
+.ruff_cache/
+
+# ─── IDEs & Editors ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Database & Cache ─────────────────────────────────────────────────────────
+*.db
+*.sqlite3
+dump.rdb
+
+# ─── Node (if a frontend is added later) ─────────────────────────────────────
+node_modules/
+.npm/
+.next/
+dist/
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+.docker/
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+*.bak
+*.tmp
