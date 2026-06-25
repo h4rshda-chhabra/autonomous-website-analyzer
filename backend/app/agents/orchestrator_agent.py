@@ -298,6 +298,7 @@ class OrchestratorAgent(BaseAgent):
 
         # Dispatch Synthesis
         await agent_runner.dispatch(AgentType.SYNTHESIS, self.audit_id)
+        
 
     async def _check_for_mid_audit_plan_updates(self) -> None:
         """

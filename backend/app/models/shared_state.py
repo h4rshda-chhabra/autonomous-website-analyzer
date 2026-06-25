@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -140,6 +140,24 @@ class SharedState(BaseModel):
     next_sequence: int = Field(
         0,
         description="Monotonically increasing counter for trace event sequencing",
+    )
+
+    # ── Synthesis Output (populated by SynthesisAgent after LLM call) ──────────
+    synthesis_insights: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Populated by SynthesisAgent: executive_summary, top_actions, scores, "
+            "estimated_fix_hours. None when synthesis has not yet run or LLM was unavailable."
+        ),
+    )
+
+    # ── AI Warnings (set when LLM is unavailable and a fallback was used) ───────
+    ai_warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Non-fatal warnings produced during the audit. "
+            "Populated when AI components fall back to deterministic mode."
+        ),
     )
 
     # ── Timestamps ────────────────────────────────────────────────────────────

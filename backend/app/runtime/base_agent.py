@@ -254,6 +254,7 @@ class BaseAgent(ABC):
         state_reader: ISharedStateReader,
         state_writer: ISharedStateWriter,
         finding_factory: IFindingFactory,
+        llm_client: Optional[Any] = None,
     ) -> None:
         self.audit_id = audit_id
         self._tools = tool_executor
@@ -261,6 +262,7 @@ class BaseAgent(ABC):
         self._reader = state_reader
         self._writer = state_writer
         self._factory = finding_factory
+        self._llm = llm_client   # Optional[LLMClient] — None when AI is not configured
         self._findings_written: int = 0
         self._started_at: Optional[datetime] = None
 
@@ -487,3 +489,12 @@ class BaseAgent(ABC):
         Returns empty list if agent hasn't completed (non-blocking).
         """
         return await self._reader.get_findings_by_agent(self.audit_id, from_agent)
+
+    async def add_ai_warning(self, message: str) -> None:
+        """
+        Records a non-fatal AI warning (e.g. LLM unavailable, fell back to deterministic).
+        Stored in SharedState.ai_warnings for the final audit summary.
+        """
+        if hasattr(self._writer, "add_warning"):
+            await self._writer.add_warning(self.audit_id, message)
+        await self.emit_trace(TraceEventType.OBSERVATION, observation=f"[AI WARNING] {message}")

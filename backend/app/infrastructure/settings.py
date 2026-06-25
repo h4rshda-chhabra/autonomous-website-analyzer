@@ -18,8 +18,18 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
-    # ── Anthropic ─────────────────────────────────────────────────────────────
-    anthropic_api_key: str = Field(default="", description="Required for AI tool calls")
+    # ── OpenRouter (primary LLM provider) ────────────────────────────────────
+    openrouter_api_key: str = Field(default="", description="OpenRouter API key (sk-or-v1-...)")
+    openrouter_model: str = Field(default="anthropic/claude-sonnet-4", description="Model ID on OpenRouter")
+    openrouter_max_tokens: int = 4096
+    openrouter_classification_max_tokens: int = 1024
+    openrouter_planning_max_tokens: int = 2048
+    openrouter_synthesis_max_tokens: int = 4096
+    openrouter_content_max_tokens: int = 2048
+    openrouter_timeout_seconds: float = 90.0
+
+    # ── Anthropic (legacy — kept for backward-compat, not used by new code) ──
+    anthropic_api_key: str = Field(default="", description="Deprecated: use openrouter_api_key")
     anthropic_model: str = "claude-sonnet-4-6"
     anthropic_max_tokens: int = 4096
     anthropic_classification_max_tokens: int = 1024

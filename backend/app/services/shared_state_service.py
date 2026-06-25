@@ -63,10 +63,20 @@ class SharedStateService(ISharedStateReader, ISharedStateWriter):
                 state.auditing_started_at = now
             elif new_status == AuditStatus.SYNTHESIZING:
                 state.synthesis_started_at = now
-            elif new_status == AuditStatus.COMPLETE:
+            elif new_status in (AuditStatus.COMPLETE, AuditStatus.COMPLETE_WITH_WARNINGS):
                 state.completed_at = now
             elif new_status == AuditStatus.FAILED:
                 state.failed_at = now
+
+    async def add_warning(self, audit_id: UUID, message: str) -> None:
+        async with self._lock(audit_id):
+            state = self._get_required(audit_id)
+            state.ai_warnings.append(message)
+
+    async def set_synthesis_insights(self, audit_id: UUID, insights: dict) -> None:
+        async with self._lock(audit_id):
+            state = self._get_required(audit_id)
+            state.synthesis_insights = insights
 
     async def set_failure_reason(self, audit_id: UUID, reason: str) -> None:
         async with self._lock(audit_id):

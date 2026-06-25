@@ -89,6 +89,14 @@ from app.models.site_profile import RenderingEvidence, ReconSignal, SiteGoal
 # ── Infrastructure ────────────────────────────────────────────────────────────
 from app.infrastructure.settings import settings
 
+# ── Runtime (Phase 1C) ────────────────────────────────────────────────────────
+from app.runtime.agent_runtime import AgentRuntime
+from app.services.shared_state_service import SharedStateService
+from app.services.finding_factory import FindingFactoryImpl
+from app.services.trace_service import TraceServiceImpl
+from app.tools.registry import build_registry
+from app.models.enums import AgentStatus, AuditStatus as _AuditStatus
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Terminal formatting helpers
@@ -948,12 +956,104 @@ async def run_pipeline(url: str, api_key: str, screenshot: bool = True) -> None:
     _kv("Plan rationale:", plan.rationale.site_summary[:100])
     _kv("Est. duration:", f"{plan.rationale.estimated_duration_seconds}s")
 
-    # ── Findings ──────────────────────────────────────────────────────────────
+    # ── Phase 1C: Agent Runtime ───────────────────────────────────────────────
+    print(f"\n{'─' * _W}")
+    print(f"  Phase 1C — Multi-Agent Execution")
+    print(f"{'─' * _W}")
+
+    # Populate SharedState with all recon artifacts so agents can read them.
+    state_svc = SharedStateService()
+    await state_svc.create_session(audit_id, url)
+    await state_svc.store_recon_artifact(audit_id, "playwright_output", crawl)
+    await state_svc.store_recon_artifact(audit_id, "header_analysis", headers)
+    await state_svc.store_recon_artifact(audit_id, "link_extraction", links)
+    if screenshot_path:
+        await state_svc.store_recon_artifact(audit_id, "screenshot_path", screenshot_path)
+    await state_svc.set_site_profile(audit_id, profile)
+    await state_svc.set_audit_plan(audit_id, plan)
+    await state_svc.transition_status(audit_id, _AuditStatus.AUDITING)
+
+    trace_svc = TraceServiceImpl()
+    factory = FindingFactoryImpl()
+    registry = build_registry()
+    runtime = AgentRuntime(state=state_svc, trace=trace_svc, factory=factory, registry=registry)
+
+    # Announce which agents will run.
+    specialist_types = [
+        a for a in plan.parallel_agents
+        if a.value not in ("synthesis", "orchestrator")
+    ]
+    for agent_type in specialist_types:
+        print(f"\n  Running {agent_type.value.capitalize()} Agent...", flush=True)
+
+    # Run all specialist agents concurrently.
+    t_agents = time.monotonic()
+    await runtime.run_specialists(audit_id)
+
+    # Print per-agent finding counts.
+    for agent_type in specialist_types:
+        agent_state = await state_svc.get_state(audit_id)
+        agent_findings = await state_svc.get_findings_by_agent(audit_id, agent_type)
+        entry = agent_state.agent_states.get(agent_type) if agent_state else None
+        status_icon = "✓" if (entry and entry.status == AgentStatus.COMPLETE) else "✗"
+        print(f"  {status_icon} {agent_type.value.capitalize()} Agent: {len(agent_findings)} finding(s)", flush=True)
+
+    # Run Synthesis.
+    print(f"\n  Running Synthesis Agent...", flush=True)
+    await runtime.run_synthesis(audit_id)
+    synth_findings = await state_svc.get_findings_by_agent(audit_id, __import__("app.models.enums", fromlist=["AgentType"]).AgentType.SYNTHESIS)
+    print(f"  ✓ Synthesis Agent: {len(synth_findings)} compound finding(s)")
+    print(f"\n  Agents complete in {_elapsed(t_agents)}", flush=True)
+
+    # ── Final agent-based findings summary ────────────────────────────────────
+    all_agent_findings = await state_svc.get_all_findings(audit_id)
+    from app.models.enums import Severity as _Sev
+    _n_critical = sum(1 for f in all_agent_findings if f.severity == _Sev.CRITICAL)
+    _n_high     = sum(1 for f in all_agent_findings if f.severity == _Sev.HIGH)
+    _n_medium   = sum(1 for f in all_agent_findings if f.severity == _Sev.MEDIUM)
+    _n_low      = sum(1 for f in all_agent_findings if f.severity == _Sev.LOW)
+
+    print(f"\n{'═' * _W}")
+    print(f"  Audit Complete")
+    print(f"{'─' * _W}")
+    print(f"  Critical Findings : {_n_critical}")
+    print(f"  High Findings     : {_n_high}")
+    print(f"  Medium Findings   : {_n_medium}")
+    print(f"  Low Findings      : {_n_low}")
+    print(f"  Total             : {len(all_agent_findings)}")
+
+    # Top findings by priority score.
+    if all_agent_findings:
+        top = sorted(all_agent_findings, key=lambda f: f.priority_score, reverse=True)[:5]
+        print(f"\n  Top findings by priority:")
+        for i, f in enumerate(top, 1):
+            print(f"    {i}. [{f.severity.value.upper():<8}] [{f.agent.value:<13}] {f.title[:65]}")
+
+    # ── Recon-level findings (deterministic, from inline analysis) ────────────
     findings = _generate_findings(meta, schema_data, crawl, headers)
     _print_findings(findings)
 
     # ── JSON report ───────────────────────────────────────────────────────────
     report = _build_json_report(audit_id, url, profile, meta, schema_data, headers, links, crawl, findings)
+    # Enrich report with agent findings.
+    report["agent_findings"] = [
+        {
+            "agent": f.agent.value,
+            "category": f.category.value,
+            "severity": f.severity.value,
+            "title": f.title,
+            "priority_score": round(f.priority_score, 3),
+            "effort": f.effort.value,
+        }
+        for f in sorted(all_agent_findings, key=lambda f: f.priority_score, reverse=True)
+    ]
+    report["scores"] = {
+        "critical": _n_critical,
+        "high": _n_high,
+        "medium": _n_medium,
+        "low": _n_low,
+        "total_agent_findings": len(all_agent_findings),
+    }
     from urllib.parse import urlparse as _urlparse
     _domain = _urlparse(url).netloc.replace(".", "_").replace(":", "_")
     _json_path = f"audit_{_domain}_{str(audit_id)[:8]}.json"

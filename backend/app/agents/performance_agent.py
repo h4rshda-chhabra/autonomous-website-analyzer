@@ -43,7 +43,9 @@ class PerformanceAgent(BaseAgent):
 
         # Read caching context from header analysis
         header_analysis = await self.get_recon_artifact("header_analysis")
-        caching_score = getattr(header_analysis, "caching_score", None) if header_analysis else None
+        # HeaderAnalyzerOutput nests caching under .caching.overall_score
+        _caching = getattr(header_analysis, "caching", None) if header_analysis else None
+        caching_score = getattr(_caching, "overall_score", None) if _caching else None
 
         playwright_output = await self.get_recon_artifact("playwright_output")
         url = site_profile.final_url or site_profile.url

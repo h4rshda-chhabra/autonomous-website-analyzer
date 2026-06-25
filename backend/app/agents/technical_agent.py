@@ -33,7 +33,8 @@ class TechnicalAgent(BaseAgent):
 
         # Read header analysis from SharedState (cached from Recon — no re-fetch)
         header_analysis = await self.get_recon_artifact("header_analysis")
-        response_headers = getattr(header_analysis, "response_headers", {}) if header_analysis else {}
+        # HeaderAnalyzerOutput stores raw headers under `all_headers`, not `response_headers`
+        response_headers = getattr(header_analysis, "all_headers", {}) if header_analysis else {}
 
         # ── Tool 1: SecurityHeaderAnalyzer (no network — pure header analysis) ─
         sec_result = await self.run_tool(
@@ -74,7 +75,7 @@ class TechnicalAgent(BaseAgent):
                     confidence=0.99,
                 )
 
-            missing_headers = getattr(sec, "missing_headers", [])
+            missing_headers = getattr(sec, "critical_missing", [])
 
             if "strict-transport-security" in [h.lower() for h in missing_headers] and is_https:
                 await self.create_finding(
@@ -170,19 +171,26 @@ class TechnicalAgent(BaseAgent):
 
         # ── Tool 2: BrokenLinkChecker ─────────────────────────────────────────
         link_extraction = await self.get_recon_artifact("link_extraction")
-        all_links = getattr(link_extraction, "links", []) if link_extraction else []
-        internal_links = [lk for lk in all_links if getattr(lk, "is_internal", False)]
-        external_links = [lk for lk in all_links if not getattr(lk, "is_internal", False)]
+        # LinkExtractorOutput stores links under internal_links / external_links separately;
+        # the .links property combines them for backward compat but BrokenLinkCheckerInput
+        # requires them as separate serialized dicts.
+        raw_internal = getattr(link_extraction, "internal_links", []) if link_extraction else []
+        raw_external = getattr(link_extraction, "external_links", []) if link_extraction else []
+        all_links = raw_internal + raw_external
 
-        from app.infrastructure.settings import settings
+        def _to_dict(lk: object) -> dict:
+            if hasattr(lk, "model_dump"):
+                return lk.model_dump()
+            return vars(lk) if hasattr(lk, "__dict__") else {}
+
         link_result = await self.run_tool(
             "BrokenLinkChecker",
             BrokenLinkCheckerInput(
-                links=all_links,
+                internal_links=[_to_dict(lk) for lk in raw_internal],
+                external_links=[_to_dict(lk) for lk in raw_external],
                 base_url=url,
-                max_concurrent_requests=10,
+                max_concurrent_internal=10,
                 timeout_per_link_ms=8_000,
-                max_links=settings.max_broken_link_checks,
             ),
             action_summary=f"Checking {len(all_links)} links for broken URLs",
             timeout_override_ms=120_000,

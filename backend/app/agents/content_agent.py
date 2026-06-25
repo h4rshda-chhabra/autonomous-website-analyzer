@@ -9,7 +9,7 @@ from app.models import (
     Severity,
     TraceEventType,
 )
-from app.tools.content.schemas import ClaudeContentAnalyzerInput, ContentExtractorInput
+from app.tools.content.schemas import ContentExtractorInput
 from .base_agent import BaseAgent
 
 
@@ -201,7 +201,7 @@ class ContentAgent(BaseAgent):
                 metric_threshold="< 30%",
             )
 
-        # ── Tool 2: ClaudeContentAnalyzer (AI-powered) ────────────────────────
+        # ── AI content analysis (via LLMClient — provider-agnostic) ─────────────
         main_text = getattr(extracted_content, "main_content_text", "")
         above_fold_text = getattr(extracted_content, "above_fold_text", "")
         cta_texts = getattr(extracted_content, "cta_texts", [])
@@ -210,57 +210,62 @@ class ContentAgent(BaseAgent):
         truncated = len(main_text) > settings.max_html_chars_for_ai
         main_text_input = main_text[:settings.max_html_chars_for_ai]
 
-        ai_result = await self.run_tool(
-            "ClaudeContentAnalyzer",
-            ClaudeContentAnalyzerInput(
-                main_content_text=main_text_input,
-                above_fold_text=above_fold_text,
-                site_category=site_profile.category.value,
-                primary_goal=site_profile.primary_goals[0].goal if site_profile.primary_goals else "",
-                cta_texts=cta_texts,
-                word_count=word_count,
-            ),
-            action_summary="Scoring content quality, value proposition, and goal alignment with Claude",
-            timeout_override_ms=60_000,
-        )
+        primary_goal = site_profile.primary_goals[0].goal if site_profile.primary_goals else "unknown"
 
-        if ai_result.success:
-            ai = ai_result.data
-            ai_confidence = getattr(ai, "confidence", 0.70)
+        if self._llm and self._llm.is_available:
+            ai_data = await self._run_content_llm(
+                main_text=main_text_input,
+                above_fold_text=above_fold_text,
+                cta_texts=cta_texts,
+                site_category=site_profile.category.value,
+                primary_goal=primary_goal,
+                word_count=word_count,
+                truncated=truncated,
+                max_tokens=settings.openrouter_content_max_tokens,
+            )
+        else:
+            ai_data = None
+
+        if ai_data:
+            quality_score = ai_data.get("quality_score")
+            vp_score = ai_data.get("value_proposition_clarity_score")
+            ai_confidence = float(ai_data.get("confidence", 0.70))
             if truncated:
                 ai_confidence = min(ai_confidence, 0.75)
             if word_count < 200:
                 ai_confidence = min(ai_confidence, 0.65)
 
-            quality_score = getattr(ai, "quality_score", None)
-            vp_score = getattr(ai, "value_proposition_clarity_score", None)
-            goal_score = getattr(ai, "goal_alignment_score", None)
-
             await self.emit_trace(
                 TraceEventType.OBSERVATION,
-                observation=f"Claude scored: quality={quality_score}/10, "
-                            f"value_proposition={vp_score}/10, goal_alignment={goal_score}/10. "
+                observation=f"AI scored: quality={quality_score}/10, "
+                            f"value_proposition={vp_score}/10. "
                             f"Confidence: {ai_confidence:.0%}.",
             )
 
-            # Only create AI findings where confidence >= 0.65
             if ai_confidence >= 0.65:
                 if quality_score is not None and quality_score < 5:
                     sev = Severity.HIGH if quality_score < 4 else Severity.MEDIUM
                     await self.create_finding(
                         category=FindingCategory.CONTENT_QUALITY,
                         title=f"Content quality score is low ({quality_score}/10)",
-                        description=f"Claude scored the page content {quality_score}/10 for overall quality. "
-                                    f"Key issues: {getattr(ai, 'top_issue', 'see AI analysis')}.",
+                        description=(
+                            f"AI scored the page content {quality_score}/10 for overall quality. "
+                            f"Key issues: {ai_data.get('top_issue', 'see AI analysis')}."
+                        ),
                         severity=sev,
-                        business_impact="Low-quality content reduces time on page, increases bounce rate, "
-                                        "and signals poor authority to search engines.",
+                        business_impact=(
+                            "Low-quality content reduces time on page, increases bounce rate, "
+                            "and signals poor authority to search engines."
+                        ),
                         impact_score=7 if sev == Severity.HIGH else 5,
                         effort=ImplementationEffort.MEDIUM,
                         effort_hours_min=4,
                         effort_hours_max=16,
-                        fix_description=f"Rewrite focus areas identified by AI: {getattr(ai, 'rewrite_suggestions', 'improve clarity and depth')}.",
-                        tool_name="ClaudeContentAnalyzer",
+                        fix_description=(
+                            f"Rewrite focus areas identified by AI: "
+                            f"{ai_data.get('rewrite_suggestions', 'improve clarity and depth')}."
+                        ),
+                        tool_name="LLMContentAnalyzer",
                         evidence_raw_data={"quality_score": quality_score, "ai_confidence": ai_confidence},
                         confidence=ai_confidence,
                     )
@@ -269,25 +274,31 @@ class ContentAgent(BaseAgent):
                     await self.create_finding(
                         category=FindingCategory.VALUE_PROPOSITION,
                         title=f"Value proposition is unclear (AI score: {vp_score}/10)",
-                        description=f"Claude assessed the value proposition clarity as {vp_score}/10. "
-                                    "Visitors cannot quickly understand what differentiates this offering.",
+                        description=(
+                            f"AI assessed value proposition clarity as {vp_score}/10. "
+                            "Visitors cannot quickly understand what differentiates this offering."
+                        ),
                         severity=Severity.HIGH,
-                        business_impact="An unclear value proposition is the leading cause of high bounce rates. "
-                                        "Visitors who don't understand the offering within 5 seconds leave.",
+                        business_impact=(
+                            "An unclear value proposition is the leading cause of high bounce rates. "
+                            "Visitors who don't understand the offering within 5 seconds leave."
+                        ),
                         impact_score=8,
                         effort=ImplementationEffort.MEDIUM,
                         effort_hours_min=2,
                         effort_hours_max=8,
-                        fix_description="Add a clear headline that states: who this is for, what problem it solves, "
-                                        "and what makes it better than alternatives. Test with 5-second test.",
-                        tool_name="ClaudeContentAnalyzer",
+                        fix_description=(
+                            "Add a clear headline that states: who this is for, what problem it solves, "
+                            "and what makes it better than alternatives. Test with 5-second test."
+                        ),
+                        tool_name="LLMContentAnalyzer",
                         evidence_raw_data={"vp_score": vp_score},
                         confidence=ai_confidence,
                     )
         else:
             await self.emit_trace(
                 TraceEventType.OBSERVATION,
-                observation=f"ClaudeContentAnalyzer failed: {ai_result.error.message if ai_result.error else 'unknown'}. Deterministic findings still written.",
+                observation="AI content analysis skipped (LLM unavailable). Deterministic findings only.",
             )
 
         await self.emit_trace(
@@ -295,3 +306,68 @@ class ContentAgent(BaseAgent):
             reasoning=f"Content analysis complete. {self._findings_written} finding(s) written.",
         )
         await self.complete()
+
+    async def _run_content_llm(
+        self,
+        *,
+        main_text: str,
+        above_fold_text: str,
+        cta_texts: list,
+        site_category: str,
+        primary_goal: str,
+        word_count: int,
+        truncated: bool,
+        max_tokens: int,
+    ):
+        """Calls the injected LLMClient for AI content scoring. Returns parsed dict or None."""
+        import json as _json
+        from app.llm.base import LLMMessage
+
+        system_prompt = (
+            "You are a website conversion and content quality expert. "
+            "Analyse the provided website content and return ONLY a valid JSON object. "
+            "No explanation, no markdown — just the JSON."
+        )
+        user_prompt = (
+            f"Site category: {site_category}\n"
+            f"Primary goal: {primary_goal}\n"
+            f"Word count: {word_count}{' (truncated)' if truncated else ''}\n"
+            f"Above-fold text: {above_fold_text[:500] or '(not extracted)'}\n"
+            f"CTA texts: {', '.join(cta_texts[:5]) or '(none detected)'}\n\n"
+            f"Main content:\n{main_text[:4000]}\n\n"
+            "Return a JSON object with these keys:\n"
+            '  "quality_score": integer 1-10 (overall content quality),\n'
+            '  "value_proposition_clarity_score": integer 1-10,\n'
+            '  "goal_alignment_score": integer 1-10,\n'
+            '  "top_issue": string (most important problem in one sentence),\n'
+            '  "rewrite_suggestions": string (2-3 specific improvement suggestions),\n'
+            '  "confidence": float 0.0-1.0 (your confidence in this assessment)\n'
+        )
+
+        resp = await self._llm.complete(
+            [LLMMessage(role="system", content=system_prompt),
+             LLMMessage(role="user", content=user_prompt)],
+            max_tokens=max_tokens,
+            temperature=0.1,
+            json_mode=True,
+        )
+
+        if not resp.success:
+            await self.add_ai_warning(
+                f"Content Agent: AI analysis failed — {resp.error}. Deterministic findings only."
+            )
+            return None
+
+        try:
+            raw = resp.content.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return _json.loads(raw)
+        except Exception as exc:
+            await self.add_ai_warning(
+                f"Content Agent: AI response parse error — {exc}. Deterministic findings only."
+            )
+            return None

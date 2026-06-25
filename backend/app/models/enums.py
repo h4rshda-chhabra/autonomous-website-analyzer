@@ -47,13 +47,14 @@ class AgentStatus(str, Enum):
 # ─── Audit Lifecycle ───────────────────────────────────────────────────────────
 
 class AuditStatus(str, Enum):
-    PENDING       = "pending"
-    RECON         = "recon"
-    PLANNING      = "planning"
-    AUDITING      = "auditing"
-    SYNTHESIZING  = "synthesizing"
-    COMPLETE      = "complete"
-    FAILED        = "failed"
+    PENDING                = "pending"
+    RECON                  = "recon"
+    PLANNING               = "planning"
+    AUDITING               = "auditing"
+    SYNTHESIZING           = "synthesizing"
+    COMPLETE               = "complete"
+    COMPLETE_WITH_WARNINGS = "complete_with_warnings"
+    FAILED                 = "failed"
 
 
 class AuditDepth(str, Enum):

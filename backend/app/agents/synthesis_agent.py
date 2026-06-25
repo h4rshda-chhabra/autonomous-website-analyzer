@@ -63,7 +63,7 @@ class SynthesisAgent(BaseAgent):
         await self.emit_trace(
             TraceEventType.OBSERVATION,
             observation=f"Synthesising {len(all_findings)} finding(s) across "
-                        f"{len(set(f.discovered_by for f in all_findings if hasattr(f, 'discovered_by') or True))} agent(s).",
+                        f"{len(set(f.agent for f in all_findings))} agent(s).",
         )
 
         # ── Step 1: Detect compound issues ────────────────────────────────────
@@ -131,11 +131,27 @@ class SynthesisAgent(BaseAgent):
             ),
         )
 
-        await self._writer.transition_status(self.audit_id, AuditStatus.COMPLETE)
+        # ── Step 5b: AI executive summary (optional) ─────────────────────────────
+        insights = await self._build_insights(all_findings, compound_findings, scores, quick_wins)
+        if hasattr(self._writer, "set_synthesis_insights"):
+            await self._writer.set_synthesis_insights(self.audit_id, insights)
+
+        # ── Determine final status ────────────────────────────────────────────
+        final_status = AuditStatus.COMPLETE
+        if hasattr(self._writer, "add_warning"):
+            # Read back warnings that were recorded by any agent
+            raw_state = None
+            if hasattr(self._reader, "get_state"):
+                raw_state = await self._reader.get_state(self.audit_id)
+            if raw_state and getattr(raw_state, "ai_warnings", []):
+                final_status = AuditStatus.COMPLETE_WITH_WARNINGS
+
+        await self._writer.transition_status(self.audit_id, final_status)
         await self.emit_trace(
             TraceEventType.REASONING,
             reasoning=f"Synthesis complete. {len(all_findings)} specialist finding(s) + "
-                      f"{len(compound_findings)} compound finding(s) processed.",
+                      f"{len(compound_findings)} compound finding(s) processed. "
+                      f"Status: {final_status.value}.",
         )
         await self.complete()
 
@@ -367,7 +383,7 @@ class SynthesisAgent(BaseAgent):
         ]
         if quick_wins:
             total_hours = sum(
-                (f.fix_suggestion.effort_hours_max if f.fix_suggestion else 2)
+                (f.effort_hours_max if f.effort_hours_max is not None else 2)
                 for f in quick_wins
             )
             insights.append(
@@ -397,3 +413,153 @@ class SynthesisAgent(BaseAgent):
             )
 
         return insights
+
+    # ─── AI Insights ──────────────────────────────────────────────────────────
+
+    async def _build_insights(
+        self,
+        findings: List[Finding],
+        compound_findings: List[Finding],
+        scores: Dict[str, int],
+        quick_wins: List[Finding],
+    ) -> Dict:
+        """
+        Produces the synthesis_insights dict that main.py uses for the summary panel.
+        Calls LLM when available for an executive summary + top 3 actions.
+        Falls back to deterministic text if LLM is unavailable.
+        """
+        all_ranked = sorted(
+            findings + compound_findings,
+            key=lambda f: f.priority_score,
+            reverse=True,
+        )
+
+        scores_text = " | ".join(
+            f"{k.capitalize()}: {v}/100"
+            for k, v in scores.items()
+        )
+        top_findings_text = "\n".join(
+            f"  [{f.severity.value.upper()}][{f.agent.value}] {f.title}"
+            for f in all_ranked[:8]
+        )
+        n_critical = sum(1 for f in findings + compound_findings if f.severity.value == "critical")
+        n_high     = sum(1 for f in findings + compound_findings if f.severity.value == "high")
+        n_medium   = sum(1 for f in findings + compound_findings if f.severity.value == "medium")
+        n_low      = sum(1 for f in findings + compound_findings if f.severity.value == "low")
+        total_fix_hours = sum(
+            (f.effort_hours_max or 2) for f in all_ranked if f.severity.value in ("critical", "high")
+        )
+
+        # Base dict that's always populated deterministically
+        base = {
+            "scores": scores,
+            "finding_counts": {"critical": n_critical, "high": n_high, "medium": n_medium, "low": n_low},
+            "total_findings": len(findings) + len(compound_findings),
+            "quick_wins_count": len(quick_wins),
+            "estimated_fix_hours": total_fix_hours,
+            "executive_summary": None,   # filled by LLM or fallback
+            "top_actions": [],
+        }
+
+        if self._llm and self._llm.is_available:
+            llm_result = await self._call_summary_llm(
+                scores_text=scores_text,
+                top_findings_text=top_findings_text,
+                n_critical=n_critical, n_high=n_high,
+                total_fix_hours=total_fix_hours,
+                quick_wins_count=len(quick_wins),
+            )
+            if llm_result:
+                base["executive_summary"] = llm_result.get("executive_summary")
+                base["top_actions"] = llm_result.get("top_actions", [])
+                return base
+
+        # Deterministic fallback summary
+        if not findings:
+            summary = "No significant issues were detected. The site is performing well across all audited domains."
+        else:
+            worst_domain = min(
+                ((k, v) for k, v in scores.items() if k != "overall"),
+                key=lambda kv: kv[1],
+                default=("unknown", 100),
+            )
+            summary = (
+                f"The audit identified {len(findings) + len(compound_findings)} findings across all domains. "
+                f"The weakest area is {worst_domain[0].capitalize()} ({worst_domain[1]}/100). "
+                f"There are {n_critical} critical and {n_high} high-priority issues requiring immediate attention. "
+                f"Addressing the {len(quick_wins)} quick-win(s) alone would yield significant improvements."
+            )
+
+        top_actions = [
+            {
+                "action": f.title,
+                "why": f.business_impact[:100] if f.business_impact else "",
+                "expected_impact": f"Severity: {f.severity.value}, effort: {f.effort.value}",
+            }
+            for f in all_ranked[:3]
+        ]
+
+        base["executive_summary"] = summary
+        base["top_actions"] = top_actions
+        return base
+
+    async def _call_summary_llm(
+        self,
+        *,
+        scores_text: str,
+        top_findings_text: str,
+        n_critical: int,
+        n_high: int,
+        total_fix_hours: int,
+        quick_wins_count: int,
+    ) -> Optional[Dict]:
+        """Calls LLM for executive summary. Returns parsed dict or None on any failure."""
+        import json as _json
+        from app.llm.base import LLMMessage
+        from app.infrastructure.settings import settings
+
+        system = (
+            "You are a senior web performance and SEO consultant writing an executive audit summary. "
+            "Be concise, specific, and business-focused. Return ONLY a valid JSON object."
+        )
+        user = (
+            f"Website audit results:\n\n"
+            f"Scores: {scores_text}\n\n"
+            f"Finding counts: {n_critical} critical, {n_high} high\n"
+            f"Quick wins available: {quick_wins_count}\n"
+            f"Estimated fix effort for critical+high issues: {total_fix_hours} hours\n\n"
+            f"Top findings:\n{top_findings_text}\n\n"
+            "Return a JSON object with:\n"
+            '  "executive_summary": "3-4 sentences summarising the audit, key risks, and business impact",\n'
+            '  "top_actions": [\n'
+            '    {"action": "...", "why": "...", "expected_impact": "..."},\n'
+            "    (exactly 3 items)\n"
+            "  ]\n"
+        )
+
+        resp = await self._llm.complete(
+            [LLMMessage(role="system", content=system),
+             LLMMessage(role="user", content=user)],
+            max_tokens=settings.openrouter_synthesis_max_tokens,
+            temperature=0.2,
+            json_mode=True,
+        )
+
+        if not resp.success:
+            await self.add_ai_warning(
+                f"Synthesis Agent: AI summary failed — {resp.error}. Using deterministic fallback."
+            )
+            return None
+
+        try:
+            raw = resp.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return _json.loads(raw)
+        except Exception as exc:
+            await self.add_ai_warning(
+                f"Synthesis Agent: AI summary parse error — {exc}. Using deterministic fallback."
+            )
+            return None
